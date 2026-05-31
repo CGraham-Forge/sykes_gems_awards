@@ -56,7 +56,7 @@ div[data-testid="stDataFrame"] { border-radius: 8px; }
 # ── Load data ─────────────────────────────────────────────────────────────────
 @st.cache_data
 def load_data():
-    df = pd.read_csv('gems_dashboard_data.csv')
+    df = pd.read_csv('gems_award_shortlist_filtered.csv')
     return df
 
 df = load_data()
@@ -274,9 +274,10 @@ with tab2:
                         'property_category_score', 'matching_review_count', 'SykesTicks', 'criteria_flag']
         available = [c for c in display_cols if c in filtered.columns]
         st.dataframe(
-            filtered[available].sort_values(['category', 'category_rank']),
+            filtered[available].reset_index(drop=True),
             use_container_width=True, hide_index=True
         )
+       
 
 # ════════════════════════════════════════════════════════════════════════════
 # TAB 3 — CHAT
