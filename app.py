@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import requests
+import re
 
 st.set_page_config(
     page_title='Sykes Gems 2026',
@@ -57,7 +58,13 @@ div[data-testid="stDataFrame"] { border-radius: 8px; }
 @st.cache_data
 def load_data():
     df = pd.read_csv('gems_award_shortlist_filtered.csv')
-    df['property_category_score'] = pd.to_numeric(df['property_category_score'], errors='coerce').round(2)
+
+    # Keep the original numeric score for matching/searching.
+    # The rounded version is only for display, otherwise questions like
+    # "which property has score 9.142857143?" can fail or become ambiguous.
+    df['property_category_score_raw'] = pd.to_numeric(df['property_category_score'], errors='coerce')
+    df['property_category_score'] = df['property_category_score_raw'].round(2)
+
     return df
 
 df = load_data()
@@ -66,6 +73,61 @@ COUNTIES   = sorted(df['County'].dropna().unique().tolist())
 
 # API key from Streamlit secrets
 API_KEY = st.secrets.get('OPENAI_API_KEY', '')
+
+
+# ── Deterministic score lookup ─────────────────────────────────────────────────
+def score_lookup_from_question(question, data):
+    """
+    Handles questions such as:
+    - "which property has score 9.142857143"
+    - "which property has this score 9.14"
+    - "show score 8.75"
+
+    This avoids relying on the LLM to create the right pandas tolerance.
+    """
+    q = question.lower()
+
+    # Only trigger for genuine score/property lookup questions.
+    if 'score' not in q:
+        return None
+
+    match = re.search(r'(?<!\d)(\d{1,2}(?:\.\d+)?)(?!\d)', q)
+    if not match:
+        return None
+
+    score_text = match.group(1)
+    score = float(score_text)
+    decimals = len(score_text.split('.')[1]) if '.' in score_text else 0
+
+    raw_score = pd.to_numeric(data['property_category_score_raw'], errors='coerce')
+
+    # If the user gives 2 decimals, interpret it as "rounds to this value".
+    # Example: 9.14 means anything from 9.135 to just under 9.145.
+    if decimals <= 2:
+        matched = data[raw_score.round(2) == round(score, 2)].copy()
+    else:
+        # If they pasted a long score, use a tight tolerance first.
+        tolerance = max(5 * (10 ** -decimals), 1e-9)
+        matched = data[(raw_score - score).abs() <= tolerance].copy()
+
+        # Fallback: allow a slightly wider tolerance for database/CSV float storage.
+        if matched.empty:
+            matched = data[(raw_score - score).abs() <= 0.000001].copy()
+
+    if matched.empty:
+        return matched
+
+    matched['score_difference'] = (raw_score.loc[matched.index] - score).abs()
+
+    output_cols = [
+        'PropertyName', 'property_id', 'category', 'category_rank',
+        'County', 'Country', 'property_category_score_raw',
+        'property_category_score', 'criteria_flag'
+    ]
+    output_cols = [c for c in output_cols if c in matched.columns]
+
+    return matched.sort_values(['score_difference', 'category_rank'])[output_cols].head(50)
+
 
 # ── Header ────────────────────────────────────────────────────────────────────
 c1, c2 = st.columns([1, 8])
@@ -328,9 +390,27 @@ with tab3:
         if user_q:
             st.session_state.chat_history.append({'role': 'user', 'content': user_q})
 
-            # Step 1: Use LLM to convert question to pandas filter code
+            # Step 1: Handle score lookup deterministically before using the LLM.
+            # This fixes cases where the score exists but exact float matching fails.
+            direct_score_result = score_lookup_from_question(user_q, df)
+
+            if direct_score_result is not None:
+                if direct_score_result.empty:
+                    result_str = (
+                        'No property matched that score exactly after applying the score tolerance. '
+                        'Try asking for the score rounded to 2 decimals, for example 9.14.'
+                    )
+                    pandas_code = 'DIRECT_SCORE_LOOKUP_NO_MATCH'
+                else:
+                    result_str = direct_score_result.to_string(index=False)
+                    pandas_code = 'DIRECT_SCORE_LOOKUP'
+            else:
+                result_str = None
+                pandas_code = None
+
+            # Step 2: If not a score lookup, use LLM to convert question to pandas filter code
             cols_available = ['property_id','PropertyName','category','category_rank',
-                              'County','Country','property_category_score','matching_review_count',
+                              'County','Country','property_category_score','property_category_score_raw','matching_review_count',
                               'SykesTicks','meets_property_criteria','criteria_flag',
                               'AllowsPets','hasHotTub','isCoastal','isFarm','isLuxury',
                               'isRomantic','hasCharacter','isNearWalks','hasCotAvailable',
@@ -344,7 +424,7 @@ with tab3:
                 f"that queries a DataFrame called `df`.\n\n"
                 f"COLUMN REFERENCE:\n"
                 f"- property_id, PropertyName, category, category_rank, County, Country\n"
-                f"- property_category_score (float 0-10), matching_review_count (int)\n"
+                f"- property_category_score (rounded display score, float 0-10), property_category_score_raw (original unrounded score), matching_review_count (int)\n"
                 f"- SykesTicks (int 1-5), meets_property_criteria (object: True/False/NaN), criteria_flag (string)\n"
                 f"- AllowsPets, hasHotTub, isCoastal, isFarm, isLuxury, isRomantic, hasCharacter, "
                 f"isNearWalks, hasCotAvailable, isChildFriendly, hasSwimmingPool (all 1=Yes 0=No)\n"
@@ -354,7 +434,7 @@ with tab3:
                 f"\n\nIMPORTANT RULES:\n"
                 f"- Return ONLY a valid Python expression, no markdown, no backticks, no explanation\n"
                 f"- Always use pd.to_numeric(df['property_category_score'], errors='coerce') when filtering scores\n"
-                f"- For score lookups use .between(score-0.1, score+0.1) to handle floating point\n"
+                f"- For score lookups use property_category_score_raw and a tight tolerance, e.g. abs(pd.to_numeric(df['property_category_score_raw'], errors='coerce') - score) < 0.000001\n"
                 f"- meets_property_criteria is object dtype - compare with string 'True' or 'False'\n"
                 f"- Always include PropertyName, County, category, category_rank, property_category_score in output\n"
                 f"- Never return CANNOT_ANSWER - always attempt a query\n\n"
@@ -364,35 +444,32 @@ with tab3:
                 f"Q: Which farms are best for young families?\n"
                 f"A: df[df['category']=='Best for Young Families'][['PropertyName','category_rank','County','property_category_score','criteria_flag','evidence_quote_1']].sort_values('category_rank')\n\n"
                 f"Q: Which property has score around 9.43?\n"
-                f"A: df[pd.to_numeric(df['property_category_score'], errors='coerce').between(9.33, 9.53)][['PropertyName','category','category_rank','County','property_category_score']]\n\n"
+                f"A: df[abs(pd.to_numeric(df['property_category_score_raw'], errors='coerce') - 9.43) < 0.000001][['PropertyName','category','category_rank','County','property_category_score_raw','property_category_score']]\n\n"
                 f"Q: Top 5 pet friendly properties?\n"
                 f"A: df[df['category']=='Best Pet Friendly Property'].sort_values('category_rank').head(5)[['PropertyName','category_rank','County','property_category_score','evidence_quote_1']]"
             )
 
             with st.spinner('Querying data...'):
                 try:
-                    # Get pandas code from LLM
-                    code_resp = requests.post(
-                        'https://api.openai.com/v1/chat/completions',
-                        headers={'Authorization': f'Bearer {API_KEY}', 'Content-Type': 'application/json'},
-                        json={
-                            'model': 'gpt-4o-mini',
-                            'messages': [
-                                {'role': 'system', 'content': query_system},
-                                {'role': 'user', 'content': user_q}
-                            ],
-                            'max_tokens': 300,
-                            'temperature': 0
-                        },
-                        timeout=30
-                    )
-                    pandas_code = code_resp.json()['choices'][0]['message']['content'].strip()
+                    if result_str is None:
+                        # Get pandas code from LLM
+                        code_resp = requests.post(
+                            'https://api.openai.com/v1/chat/completions',
+                            headers={'Authorization': f'Bearer {API_KEY}', 'Content-Type': 'application/json'},
+                            json={
+                                'model': 'gpt-4o-mini',
+                                'messages': [
+                                    {'role': 'system', 'content': query_system},
+                                    {'role': 'user', 'content': user_q}
+                                ],
+                                'max_tokens': 300,
+                                'temperature': 0
+                            },
+                            timeout=30
+                        )
+                        pandas_code = code_resp.json()['choices'][0]['message']['content'].strip()
 
-                    if pandas_code == 'CANNOT_ANSWER':
-                        query_result = 'No relevant data found for this question.'
-                        result_str = query_result
-                    else:
-                        # Step 2: Execute the pandas code against the full dataset
+                        # Execute the pandas code against the full dataset
                         try:
                             result = eval(pandas_code, {'df': df, 'pd': pd})
                             if hasattr(result, 'to_string'):
@@ -402,7 +479,7 @@ with tab3:
                         except Exception as e:
                             result_str = f'Query error: {str(e)}'
 
-                    # Step 3: Use LLM to summarise the result in plain English
+                    # Summarise the result in plain English
                     summary_system = f"""You are a helpful assistant for the Sykes Gems 2026 award programme.
 The user asked: {user_q}
 
@@ -411,6 +488,7 @@ Here is the data retrieved to answer that question:
 
 Summarise this data clearly and concisely in plain English.
 When listing properties, include their name, county, score and rank.
+If the retrieved data includes property_category_score_raw, use that as the exact score and property_category_score as the rounded display score.
 Use bullet points for lists. Do not make up any facts not present in the data above."""
 
                     summary_resp = requests.post(
