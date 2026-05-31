@@ -56,7 +56,7 @@ div[data-testid="stDataFrame"] { border-radius: 8px; }
 # ── Load data ─────────────────────────────────────────────────────────────────
 @st.cache_data
 def load_data():
-    df = pd.read_csv('gems_award_shortlist_filtered.csv')
+    df = pd.read_csv('gems_dashboard_data.csv')
     return df
 
 df = load_data()
@@ -273,12 +273,10 @@ with tab2:
         display_cols = ['category_rank', 'property_id', 'PropertyName', 'County',
                         'property_category_score', 'matching_review_count', 'SykesTicks', 'criteria_flag']
         available = [c for c in display_cols if c in filtered.columns]
-        sort_cols = [c for c in ['category', 'category_rank'] if c in filtered.columns]
         st.dataframe(
-            filtered[available].reset_index(drop=True),
+            filtered[available].sort_values(['category', 'category_rank']),
             use_container_width=True, hide_index=True
         )
-        
 
 # ════════════════════════════════════════════════════════════════════════════
 # TAB 3 — CHAT
@@ -328,41 +326,104 @@ with tab3:
         if user_q:
             st.session_state.chat_history.append({'role': 'user', 'content': user_q})
 
-            data_context = (
-                f"You are a data analyst assistant for the Sykes Gems 2026 award programme at Sykes Holidays. "
-                f"Answer questions about the shortlisted properties clearly and concisely. "
-                f"When listing properties, include their name, county, score and rank. Use bullet points for lists.\n\n"
-                f"SHORTLIST SUMMARY:\n"
-                f"- Total properties: {len(df)}\n"
-                f"- Categories: {', '.join(CATEGORIES)}\n"
-                f"- Properties per category: {df.groupby('category').size().to_dict()}\n"
-                f"- Criteria met: {met_n_chat}, Manual review: {review_n_chat}\n"
-                f"- Score range: {df['property_category_score'].min():.2f} to {df['property_category_score'].max():.2f}\n"
-                f"- Top counties: {df['County'].value_counts().head(10).to_dict()}\n\n"
-                f"FULL DATA (first 200 rows):\n"
-                f"{df[['property_id','PropertyName','category','category_rank','County','Country','property_category_score','matching_review_count','SykesTicks','meets_property_criteria','criteria_flag','evidence_quote_1','evidence_quote_2']].head(200).to_string()}"
-            )
+            # Step 1: Use LLM to convert question to pandas filter code
+            cols_available = ['property_id','PropertyName','category','category_rank',
+                              'County','Country','property_category_score','matching_review_count',
+                              'SykesTicks','meets_property_criteria','criteria_flag',
+                              'AllowsPets','hasHotTub','isCoastal','isFarm','isLuxury',
+                              'isRomantic','hasCharacter','isNearWalks','hasCotAvailable',
+                              'isChildFriendly','hasSwimmingPool',
+                              'evidence_quote_1','evidence_quote_2','evidence_quote_3',
+                              'evidence_quote_4','evidence_quote_5']
+            cols_in_df = [c for c in cols_available if c in df.columns]
 
-            with st.spinner('Thinking...'):
+            query_system = f"""You are a data analyst. Convert the user question into a Python pandas expression
+that filters or queries a DataFrame called `df` with these columns: {cols_in_df}
+
+Rules:
+- Return ONLY a Python expression that evaluates to a DataFrame or scalar value
+- Use df.query(), boolean indexing, groupby, value_counts etc as appropriate
+- Do NOT use markdown, comments, or explanation — raw Python only
+- For yes/no columns (AllowsPets, hasHotTub etc), 1 = Yes, 0 = No
+- meets_property_criteria: True = criteria met, False = manual review, NaN = no data
+- category values: {CATEGORIES}
+- If asking for top N, use .head(N) and sort by property_category_score descending first
+- If the question cannot be answered from the data, return the string: CANNOT_ANSWER
+
+Examples:
+Q: Which farm stay properties are in Devon?
+A: df[(df['category']=='Best Farm Stay') & (df['County']=='Devon')][['PropertyName','category_rank','property_category_score','criteria_flag']]
+
+Q: Which category has the highest average score?
+A: df.groupby('category')['property_category_score'].mean().sort_values(ascending=False)
+
+Q: How many beach properties need manual review?
+A: (df[(df['category']=='Best for Beaches') & (df['meets_property_criteria']==False)].shape[0])
+"""
+
+            with st.spinner('Querying data...'):
                 try:
-                    resp = requests.post(
+                    # Get pandas code from LLM
+                    code_resp = requests.post(
                         'https://api.openai.com/v1/chat/completions',
                         headers={'Authorization': f'Bearer {API_KEY}', 'Content-Type': 'application/json'},
                         json={
                             'model': 'gpt-4o-mini',
                             'messages': [
-                                {'role': 'system', 'content': data_context},
+                                {'role': 'system', 'content': query_system},
+                                {'role': 'user', 'content': user_q}
+                            ],
+                            'max_tokens': 300,
+                            'temperature': 0
+                        },
+                        timeout=30
+                    )
+                    pandas_code = code_resp.json()['choices'][0]['message']['content'].strip()
+
+                    if pandas_code == 'CANNOT_ANSWER':
+                        query_result = 'No relevant data found for this question.'
+                        result_str = query_result
+                    else:
+                        # Step 2: Execute the pandas code against the full dataset
+                        try:
+                            result = eval(pandas_code, {'df': df, 'pd': pd})
+                            if hasattr(result, 'to_string'):
+                                result_str = result.to_string()
+                            else:
+                                result_str = str(result)
+                        except Exception as e:
+                            result_str = f'Query error: {str(e)}'
+
+                    # Step 3: Use LLM to summarise the result in plain English
+                    summary_system = f"""You are a helpful assistant for the Sykes Gems 2026 award programme.
+The user asked: {user_q}
+
+Here is the data retrieved to answer that question:
+{result_str[:3000]}
+
+Summarise this data clearly and concisely in plain English.
+When listing properties, include their name, county, score and rank.
+Use bullet points for lists. Do not make up any facts not present in the data above."""
+
+                    summary_resp = requests.post(
+                        'https://api.openai.com/v1/chat/completions',
+                        headers={'Authorization': f'Bearer {API_KEY}', 'Content-Type': 'application/json'},
+                        json={
+                            'model': 'gpt-4o-mini',
+                            'messages': [
+                                {'role': 'system', 'content': summary_system},
                                 *[{'role': m['role'], 'content': m['content']}
                                   for m in st.session_state.chat_history]
                             ],
-                            'max_tokens': 1000,
+                            'max_tokens': 800,
                             'temperature': 0.3
                         },
                         timeout=30
                     )
-                    answer = resp.json()['choices'][0]['message']['content']
+                    answer = summary_resp.json()['choices'][0]['message']['content']
+
                 except Exception as e:
-                    answer = f'Error calling AI: {str(e)}'
+                    answer = f'Error: {str(e)}'
 
             st.session_state.chat_history.append({'role': 'assistant', 'content': answer})
             st.rerun()
