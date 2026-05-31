@@ -57,6 +57,7 @@ div[data-testid="stDataFrame"] { border-radius: 8px; }
 @st.cache_data
 def load_data():
     df = pd.read_csv('gems_award_shortlist_filtered.csv')
+    df['property_category_score'] = pd.to_numeric(df['property_category_score'], errors='coerce').round(2)
     return df
 
 df = load_data()
