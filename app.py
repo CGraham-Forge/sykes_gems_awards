@@ -274,7 +274,7 @@ with tab2:
                         'property_category_score', 'matching_review_count', 'SykesTicks', 'criteria_flag']
         available = [c for c in display_cols if c in filtered.columns]
         st.dataframe(
-            filtered[available].sort_values(['category', 'category_rank']),
+            filtered[available].sort_values(['category'] + (['category_rank'] if 'category_rank' in available else [])),
             use_container_width=True, hide_index=True
         )
 
