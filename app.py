@@ -275,7 +275,7 @@ with tab2:
         available = [c for c in display_cols if c in filtered.columns]
         sort_cols = [c for c in ['category', 'category_rank'] if c in filtered.columns]
         st.dataframe(
-            filtered[available].sort_values(sort_cols) if sort_cols else filtered[available],
+            filtered[available].reset_index(drop=True),
             use_container_width=True, hide_index=True
         )
         
