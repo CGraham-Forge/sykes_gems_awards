@@ -56,7 +56,7 @@ div[data-testid="stDataFrame"] { border-radius: 8px; }
 # ── Load data ─────────────────────────────────────────────────────────────────
 @st.cache_data
 def load_data():
-    df = pd.read_csv('gems_award_shortlist_filtered.csv')
+    df = pd.read_csv('gems_dashboard_data.csv')
     return df
 
 df = load_data()
@@ -274,7 +274,7 @@ with tab2:
                         'property_category_score', 'matching_review_count', 'SykesTicks', 'criteria_flag']
         available = [c for c in display_cols if c in filtered.columns]
         st.dataframe(
-            filtered[available].reset_index(drop=True),
+            filtered[available].sort_values(['category', 'category_rank']),
             use_container_width=True, hide_index=True
         )
 
@@ -337,29 +337,35 @@ with tab3:
                               'evidence_quote_4','evidence_quote_5']
             cols_in_df = [c for c in cols_available if c in df.columns]
 
-            query_system = f"""You are a data analyst. Convert the user question into a Python pandas expression
-that filters or queries a DataFrame called `df` with these columns: {cols_in_df}
-
-Rules:
-- Return ONLY a Python expression that evaluates to a DataFrame or scalar value
-- Use df.query(), boolean indexing, groupby, value_counts etc as appropriate
-- Do NOT use markdown, comments, or explanation — raw Python only
-- For yes/no columns (AllowsPets, hasHotTub etc), 1 = Yes, 0 = No
-- meets_property_criteria: True = criteria met, False = manual review, NaN = no data
-- category values: {CATEGORIES}
-- If asking for top N, use .head(N) and sort by property_category_score descending first
-- If the question cannot be answered from the data, return the string: CANNOT_ANSWER
-
-Examples:
-Q: Which farm stay properties are in Devon?
-A: df[(df['category']=='Best Farm Stay') & (df['County']=='Devon')][['PropertyName','category_rank','property_category_score','criteria_flag']]
-
-Q: Which category has the highest average score?
-A: df.groupby('category')['property_category_score'].mean().sort_values(ascending=False)
-
-Q: How many beach properties need manual review?
-A: (df[(df['category']=='Best for Beaches') & (df['meets_property_criteria']==False)].shape[0])
-"""
+            query_system = (
+                f"You are a data analyst. Convert the user question into a Python pandas expression "
+                f"that queries a DataFrame called `df`.\n\n"
+                f"COLUMN REFERENCE:\n"
+                f"- property_id, PropertyName, category, category_rank, County, Country\n"
+                f"- property_category_score (float 0-10), matching_review_count (int)\n"
+                f"- SykesTicks (int 1-5), meets_property_criteria (object: True/False/NaN), criteria_flag (string)\n"
+                f"- AllowsPets, hasHotTub, isCoastal, isFarm, isLuxury, isRomantic, hasCharacter, "
+                f"isNearWalks, hasCotAvailable, isChildFriendly, hasSwimmingPool (all 1=Yes 0=No)\n"
+                f"- evidence_quote_1 through evidence_quote_5 (strings)\n\n"
+                f"EXACT CATEGORY NAMES (case sensitive):\n"
+                + "\n".join(f"- {c}" for c in CATEGORIES) +
+                f"\n\nIMPORTANT RULES:\n"
+                f"- Return ONLY a valid Python expression, no markdown, no backticks, no explanation\n"
+                f"- Always use pd.to_numeric(df['property_category_score'], errors='coerce') when filtering scores\n"
+                f"- For score lookups use .between(score-0.1, score+0.1) to handle floating point\n"
+                f"- meets_property_criteria is object dtype - compare with string 'True' or 'False'\n"
+                f"- Always include PropertyName, County, category, category_rank, property_category_score in output\n"
+                f"- Never return CANNOT_ANSWER - always attempt a query\n\n"
+                f"EXAMPLES:\n"
+                f"Q: Which farm stay properties are in Devon?\n"
+                f"A: df[(df['category']=='Best Farm Stay') & (df['County'].str.contains('Devon', na=False))][['PropertyName','category_rank','County','property_category_score','criteria_flag']]\n\n"
+                f"Q: Which farms are best for young families?\n"
+                f"A: df[df['category']=='Best for Young Families'][['PropertyName','category_rank','County','property_category_score','criteria_flag','evidence_quote_1']].sort_values('category_rank')\n\n"
+                f"Q: Which property has score around 9.43?\n"
+                f"A: df[pd.to_numeric(df['property_category_score'], errors='coerce').between(9.33, 9.53)][['PropertyName','category','category_rank','County','property_category_score']]\n\n"
+                f"Q: Top 5 pet friendly properties?\n"
+                f"A: df[df['category']=='Best Pet Friendly Property'].sort_values('category_rank').head(5)[['PropertyName','category_rank','County','property_category_score','evidence_quote_1']]"
+            )
 
             with st.spinner('Querying data...'):
                 try:
