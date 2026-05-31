@@ -56,7 +56,7 @@ div[data-testid="stDataFrame"] { border-radius: 8px; }
 # ── Load data ─────────────────────────────────────────────────────────────────
 @st.cache_data
 def load_data():
-    df = pd.read_csv('gems_dashboard_data.csv')
+    df = pd.read_csv('df = pd.read_csv('gems_award_shortlist_filtered.csv')
     return df
 
 df = load_data()
