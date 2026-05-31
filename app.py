@@ -273,10 +273,12 @@ with tab2:
         display_cols = ['category_rank', 'property_id', 'PropertyName', 'County',
                         'property_category_score', 'matching_review_count', 'SykesTicks', 'criteria_flag']
         available = [c for c in display_cols if c in filtered.columns]
+        sort_cols = [c for c in ['category', 'category_rank'] if c in filtered.columns]
         st.dataframe(
-            filtered[available].sort_values(['category'] + (['category_rank'] if 'category_rank' in available else [])),
+            filtered[available].sort_values(sort_cols) if sort_cols else filtered[available],
             use_container_width=True, hide_index=True
         )
+        
 
 # ════════════════════════════════════════════════════════════════════════════
 # TAB 3 — CHAT
